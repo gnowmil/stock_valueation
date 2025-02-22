@@ -1,0 +1,14 @@
+# 忽略所有 .env 文件
+.env
+.env.local
+.env.*.local
+conf.yaml
+# 忽略调试生成文件
+*.pyc
+
+.venv
+.DS_Store
+
+# 但保留示例文件（可选）
+!.env.example
+!conf.yaml.example

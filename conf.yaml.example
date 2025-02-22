@@ -1,0 +1,33 @@
+# conf.yaml.example
+# 环境状态
+env_state: testing
+
+# IBKR配置
+ibkr:
+  host: 127.0.0.1
+  port: 4001
+  client_id: 1
+  timeout: 30
+  read_only: true
+  account: U1234567
+
+# Telegram配置
+telegram:
+  bot_token: you bot token here
+  chat_id: your chat id here
+  timeout: 10
+  parse_mode: "MarkdownV2"
+
+# 模型参数
+model:
+  monte_carlo_sims: 10000
+  risk_free_rate: 0.02
+  pe_percentile: 0.8
+  dcf_growth_years: 5
+
+# 日志配置
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_path: "./logs/app.log"
+  rotation: "10 MB"
