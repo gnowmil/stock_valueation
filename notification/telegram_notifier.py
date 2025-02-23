@@ -2,11 +2,11 @@
 import logging
 import asyncio
 from typing import Dict, Optional, Any
-from aiohttp import ClientSession, ClientError
+from aiohttp import ClientSession, ClientError, ClientTimeout
 from config import get_settings
 from pydantic import ValidationError
 import json
-import math
+from datetime import datetime
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -22,11 +22,10 @@ class TelegramNotifier:
         self.session: Optional[ClientSession] = None
         self.queue = asyncio.Queue()
         self._message_formatter = MessageFormatter()
-        
         # 从配置加载参数
         self.token = settings.telegram.bot_token
         self.chat_id = settings.telegram.chat_id
-        self.timeout = settings.telegram.timeout
+        self.timeout = ClientTimeout(total=settings.telegram.timeout)
         self.parse_mode = settings.telegram.parse_mode
         
         # 自动启动后台任务

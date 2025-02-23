@@ -2,28 +2,45 @@
 import asyncio
 import logging
 from config.settings import Settings
-from ib_insync import IB, Stock, Contract, util
-from typing import Dict, Optional, Tuple
+from ib_insync import IB
+from typing import Dict, Optional, Any
 import xml.etree.ElementTree as ET
-import os
+from datetime import datetime, timedelta
+from .base_fetcher import BaseFetcher
+
+settings = Settings.get_instance()
 
 class IBKRConnectionError(Exception):
     """IBKR连接问题的自定义异常"""
     pass
 
-class IBKRFetcher:
+class IBKRDataError(Exception):
+    """IBKR数据获取异常"""
+    pass
+
+class IBKRFetcher(BaseFetcher):
     def __init__(self):
         self.ib = IB()
         self.connected = False
         self.logger = logging.getLogger(__name__)
+        self.settings = Settings.get_instance()
         
-        # 获取ibkr gateway配置
-        settings = Settings.get_instance()
-        self.host = settings.ibkr.host
-        self.port = settings.ibkr.port
-        self.client_id = settings.ibkr.client_id
-        self.timeout = settings.ibkr.timeout
-        self.read_only = settings.ibkr.read_only  # 新增只读状态
+        # 获取配置
+        self.host = self.settings.ibkr.host
+        self.port = self.settings.ibkr.port
+        self.client_id = self.settings.ibkr.client_id
+        self.timeout = self.settings.ibkr.timeout
+        self.read_only = self.settings.ibkr.read_only
+
+    async def is_available(self) -> bool:
+        """检查IBKR连接是否可用"""
+        try:
+            if not self.connected:
+                await self.connect()
+            return self.ib.isConnected()
+        except Exception as e:
+            self.logger.warning(f"IBKR连接检查失败: {str(e)}")
+            return False
 
     async def connect(self, retries=3, backoff=2):
         """实现带权限验证的智能重连机制"""
@@ -163,6 +180,77 @@ class IBKRFetcher:
             self.connected = False
             self.logger.info("已断开与IBKR Gateway的连接")
 
+    async def close(self):
+        """关闭IBKR连接"""
+        try:
+            if self.ib and self.ib.isConnected():
+                self.logger.debug("正在断开IBKR连接...")
+                await self.ib.disconnectAsync()
+                self.connected = False
+        except Exception as e:
+            self.logger.error(f"断开IBKR连接时出错: {str(e)}")
+            raise
+
+    async def _fetch_raw_market_data(self, symbol: str, country: str) -> Dict[str, Any]:
+        """获取原始市场数据"""
+        try:
+            if not self.ib.isConnected():
+                await self.connect()
+                
+            # 创建合约对象
+            contract = Stock(symbol, 'SMART', currency='USD')
+            await self.ib.qualifyContractsAsync(contract)
+            
+            # 获取实时行情
+            tickers = await self.ib.reqTickersAsync(contract)
+            if not tickers:
+                raise Exception(f"无法获取 {symbol} 的市场数据")
+                
+            ticker = tickers[0]
+            return {
+                'price': ticker.marketPrice(),
+                'volume': ticker.volume,
+                'currency': contract.currency,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"IBKR获取市场数据失败: {str(e)}")
+            raise
+
+    async def _fetch_raw_financials(self, symbol: str, country: str) -> Dict[str, Any]:
+        """获取原始财务数据"""
+        try:
+            if not self.ib.isConnected():
+                await self.connect()
+                
+            # 创建合约对象
+            contract = Stock(symbol, 'SMART', currency='USD')
+            await self.ib.qualifyContractsAsync(contract)
+            
+            # 获取基本面数据
+            fundamentals = await self.ib.reqFundamentalDataAsync(
+                contract, 
+                reportType='ReportsFinSummary'
+            )
+            
+            if not fundamentals:
+                raise Exception(f"无法获取 {symbol} 的财务数据")
+            
+            # 解析XML格式的财务数据
+            # TODO: 实现XML解析逻辑
+            return {
+                'pe_ratio': 0.0,
+                'market_cap': 0.0,
+                'eps': 0.0,
+                'revenue': 0.0,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"IBKR获取财务数据失败: {str(e)}")
+            raise
+
 
 async def main():
     """验证只读模式的示例"""
@@ -186,5 +274,7 @@ async def main():
         await fetcher.safe_shutdown()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # 根据环境更新日志级别
+    if settings.env_state == "development":
+            logging.getLogger().setLevel(logging.DEBUG)
     asyncio.run(main())

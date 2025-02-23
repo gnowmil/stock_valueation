@@ -2,7 +2,7 @@
 # 环境状态
 env_state: testing
 
-# IBKR配置
+# 数据源配置
 ibkr:
   host: 127.0.0.1
   port: 4001
@@ -10,6 +10,20 @@ ibkr:
   timeout: 30
   read_only: true
   account: U1234567
+
+yahoo:
+  timeout: 10
+
+alpha_vantage:
+  api_key: YOUR_ALPHA_VANTAGE_KEY
+  timeout: 15
+
+fmp:
+  api_key: YOUR_FMP_KEY
+  timeout: 15
+
+data_sources:
+  priority: ['alpha_vantage', 'yahoo', 'fmp', , 'ibkr']
 
 # Telegram配置
 telegram:

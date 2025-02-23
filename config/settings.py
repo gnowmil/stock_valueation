@@ -1,17 +1,17 @@
-import os
 import logging
 import yaml
 from pathlib import Path
 from enum import Enum
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from typing import ClassVar, Optional, Any
+from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationError
+import re
 
 class EnvironmentState(str, Enum):
-    """运行环境状态枚举"""
     DEVELOPMENT = "development"
     TESTING = "testing"
     PRODUCTION = "production"
 
+'''
 class IBKRConfig(BaseModel):
     """IBKR网关配置项"""
     host: str = Field(..., description="IBKR网关主机地址")
@@ -32,6 +32,28 @@ class IBKRConfig(BaseModel):
         if not 1 <= v <= 65535:
             raise ValueError("端口号必须在1-65535范围内")
         return v
+'''
+
+class YahooConfig(BaseModel):
+    """Yahoo Finance配置"""
+    timeout: int = Field(10, description="API请求超时时间(秒)")
+
+class AlphaVantageConfig(BaseModel):
+    """Alpha Vantage配置"""
+    api_key: str = Field(..., description="API访问令牌")
+    timeout: int = Field(15, description="API请求超时时间(秒)")
+
+class FMPConfig(BaseModel):
+    """Financial Modeling Prep配置"""
+    api_key: str = Field(..., description="API访问令牌")
+    timeout: int = Field(15, description="API请求超时时间(秒)")
+
+class DataSourceConfig(BaseModel):
+    """数据源配置"""
+    priority: list[str] = Field(
+        ['yahoo', 'alpha_vantage', 'fmp'],
+        description="数据源使用优先级顺序"
+    )
 
 class TelegramConfig(BaseModel):
     """Telegram通知配置"""
@@ -63,64 +85,110 @@ class LoggingConfig(BaseModel):
 
 class Settings(BaseModel):
     """全局配置主类"""
-    _instance = None
-    # 添加环境状态字段
-    env_state: EnvironmentState = Field(
-        default=EnvironmentState.DEVELOPMENT,
-        description="运行环境状态"
+    model_config = ConfigDict(
+        validate_assignment=True,
+        frozen=False,
+        arbitrary_types_allowed=True
     )
-    ibkr: IBKRConfig
+    
+    # 单例实例
+    _instance: ClassVar[Optional['Settings']] = None
+
+    # 配置字段
+    env_state: EnvironmentState = Field(default=EnvironmentState.TESTING)
+    #ibkr: IBKRConfig
+    yahoo: YahooConfig
+    alpha_vantage: AlphaVantageConfig
+    fmp: FMPConfig
+    data_sources: DataSourceConfig
     telegram: TelegramConfig
     model: ModelConfig
     logging: LoggingConfig
 
+    def validate_production_settings(self) -> None:
+        """验证生产环境配置"""
+        if self.env_state == EnvironmentState.PRODUCTION:
+            #if not self.ibkr.account:
+            #    raise ValidationError("生产环境需要提供IBKR账户号")
+            token_pattern = re.compile(r'^\d{9}:[\w-]{35}$')
+            if not self.telegram.bot_token or not token_pattern.match(self.telegram.bot_token):
+                raise ValidationError("生产环境需要提供有效的Telegram机器人令牌")
+            valid_sources = {'yahoo', 'alpha_vantage', 'fmp'}
+            if not all(src in valid_sources for src in self.data_sources.priority):
+                raise ValidationError("包含无效的数据源配置")
+            key_pattern = re.compile(r'^[a-zA-Z0-9]{16,32}$')
+            if not key_pattern.match(self.alpha_vantage.api_key):
+                raise ValidationError("Alpha Vantage API密钥格式无效")
+            if not key_pattern.match(self.fmp.api_key):
+                raise ValidationError("FMP API密钥格式无效")
+    
     @classmethod
     def get_instance(cls) -> 'Settings':
-        """获取Settings单例实例"""
         if cls._instance is None:
             raise RuntimeError("Settings尚未初始化，请先调用get_settings()")
         return cls._instance
     
     @classmethod
     def _set_instance(cls, instance: 'Settings') -> None:
-        """设置Settings单例实例"""
         cls._instance = instance
+    
+    @classmethod
+    def reset_instance(cls) -> None:
+        """重置单例实例"""
+        cls._instance = None
 
-def get_settings(config_file: str = 'conf.yaml') -> Settings:
-    """动态获取配置实例"""
-    if Settings._instance is not None:
-        return Settings._instance
-
+def init_settings(config_file: str = 'conf.yaml') -> tuple[Settings, str]:
+    """初始化配置和环境状态"""
     config_path = Path(__file__).parent.parent / config_file
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
 
     try:
+        # 首先设置基本的日志配置
+        logging.basicConfig(
+            level=logging.INFO,  # 默认使用 INFO 级别
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+
         with open(config_path, 'r', encoding='utf-8') as f:
             config_data = yaml.safe_load(f)
             
+        # 获取环境状态
+        env_state = str(config_data.get("env_state", "testing")).lower()
+        
+        # 根据环境更新日志级别
+        if env_state == "development":
+            logging.getLogger().setLevel(logging.DEBUG)
+            
+        # 初始化配置
         settings = Settings.model_validate(config_data)
         settings.validate_production_settings()
         Settings._set_instance(settings)
-        return settings
-    except yaml.YAMLError as e:
-        logging.error(f"YAML解析错误: {e}")
-        raise
-    except ValidationError as e:
-        logging.error(f"配置验证失败: {e}")
+        
+        logging.info("成功加载配置:")
+        logging.info(f"环境: {settings.env_state}")
+        logging.info(f"模型参数: {settings.model}")
+        
+        return settings, env_state
+        
+    except Exception as e:
+        logging.error(f"配置初始化失败: {str(e)}")
         raise
 
-# 配置日志
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(levelname)s - %(message)s')
+def get_settings(force_reload: bool = False) -> Settings:
+    """获取配置实例
+    
+    Args:
+        force_reload: 是否强制重新加载配置
+        
+    Returns:
+        Settings: 配置实例
+    """
+    if not force_reload and Settings._instance is not None:
+        return Settings._instance
+        
+    settings, _ = init_settings()
+    return settings
 
-# 初始化配置
-try:
-    settings = get_settings()
-    logging.info(f"成功加载配置")
-    logging.info(f"环境: {settings.env_state}")
-    logging.info(f"IBKR主机: {settings.ibkr.host}")
-    logging.info(f"模型参数: {settings.model}")
-except Exception as e:
-    logging.error(f"配置初始化失败: {str(e)}")
-    raise
+# 程序启动时初始化配置
+settings = get_settings()  # 移除对 env_state 的直接引用
