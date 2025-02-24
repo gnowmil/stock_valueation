@@ -2,65 +2,50 @@ import logging
 import yaml
 from pathlib import Path
 from enum import Enum
-from typing import ClassVar, Optional, Any
+from typing import ClassVar, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationError
 import re
+from aiohttp import ClientTimeout
 
 class EnvironmentState(str, Enum):
     DEVELOPMENT = "development"
     TESTING = "testing"
     PRODUCTION = "production"
 
-'''
-class IBKRConfig(BaseModel):
-    """IBKR网关配置项"""
-    host: str = Field(..., description="IBKR网关主机地址")
-    port: int = Field(4001, description="IBKR网关端口")
-    client_id: int = Field(1, description="客户端ID")
-    timeout: int = Field(30, description="连接超时时间")
-    read_only: bool = Field(True, description="是否只读模式")
-    account: Optional[str] = Field(None, description="IBKR账户号")
-    
-    @field_validator('read_only')
-    def validate_readonly(cls, v: Any) -> bool:
-        if isinstance(v, bool):
-            return v
-        return str(v).lower() in {'true', '1', 'yes'}
-    
-    @field_validator('port')
-    def validate_port(cls, v: int) -> int:
-        if not 1 <= v <= 65535:
-            raise ValueError("端口号必须在1-65535范围内")
-        return v
-'''
-
-class YahooConfig(BaseModel):
-    """Yahoo Finance配置"""
-    timeout: int = Field(10, description="API请求超时时间(秒)")
-
-class AlphaVantageConfig(BaseModel):
-    """Alpha Vantage配置"""
-    api_key: str = Field(..., description="API访问令牌")
-    timeout: int = Field(15, description="API请求超时时间(秒)")
-
 class FMPConfig(BaseModel):
     """Financial Modeling Prep配置"""
     api_key: str = Field(..., description="API访问令牌")
-    timeout: int = Field(15, description="API请求超时时间(秒)")
-
-class DataSourceConfig(BaseModel):
-    """数据源配置"""
-    priority: list[str] = Field(
-        ['yahoo', 'alpha_vantage', 'fmp'],
-        description="数据源使用优先级顺序"
+    timeout_seconds: int = Field(
+        default=15,
+        description="API请求超时时间(秒)"
     )
+    period: str = Field('annual', description="财务数据频率")
+
+    @field_validator('period')
+    def validate_period(cls, v: str) -> str:
+        valid_periods = {'annual', 'quarter'}
+        if v.lower() not in valid_periods:
+            raise ValueError(
+                f"无效的财务数据频率: {v}。"
+                f"有效值为: {', '.join(valid_periods)}"
+            )
+        return v.lower()
+
+    @property
+    def timeout(self) -> ClientTimeout:
+        """转换为 aiohttp.ClientTimeout 对象"""
+        return ClientTimeout(total=self.timeout_seconds)
 
 class TelegramConfig(BaseModel):
     """Telegram通知配置"""
     bot_token: str = Field(..., description="机器人API令牌")
     chat_id: int = Field(..., description="聊天ID")
-    timeout: int = Field(10, description="请求超时时间")
-    parse_mode: str = Field('MarkdownV2', description="消息解析模式")
+    timeout_seconds: int = Field(default=30, description="超时时间(秒)", gt=0, le=300)
+
+    @property
+    def timeout(self) -> ClientTimeout:
+        """转换为 aiohttp.ClientTimeout 对象"""
+        return ClientTimeout(total=self.timeout_seconds)
 
 class ModelConfig(BaseModel):
     """估值模型参数配置"""
@@ -96,11 +81,7 @@ class Settings(BaseModel):
 
     # 配置字段
     env_state: EnvironmentState = Field(default=EnvironmentState.TESTING)
-    #ibkr: IBKRConfig
-    yahoo: YahooConfig
-    alpha_vantage: AlphaVantageConfig
     fmp: FMPConfig
-    data_sources: DataSourceConfig
     telegram: TelegramConfig
     model: ModelConfig
     logging: LoggingConfig
@@ -108,17 +89,11 @@ class Settings(BaseModel):
     def validate_production_settings(self) -> None:
         """验证生产环境配置"""
         if self.env_state == EnvironmentState.PRODUCTION:
-            #if not self.ibkr.account:
-            #    raise ValidationError("生产环境需要提供IBKR账户号")
             token_pattern = re.compile(r'^\d{9}:[\w-]{35}$')
             if not self.telegram.bot_token or not token_pattern.match(self.telegram.bot_token):
                 raise ValidationError("生产环境需要提供有效的Telegram机器人令牌")
-            valid_sources = {'yahoo', 'alpha_vantage', 'fmp'}
-            if not all(src in valid_sources for src in self.data_sources.priority):
-                raise ValidationError("包含无效的数据源配置")
+            
             key_pattern = re.compile(r'^[a-zA-Z0-9]{16,32}$')
-            if not key_pattern.match(self.alpha_vantage.api_key):
-                raise ValidationError("Alpha Vantage API密钥格式无效")
             if not key_pattern.match(self.fmp.api_key):
                 raise ValidationError("FMP API密钥格式无效")
     

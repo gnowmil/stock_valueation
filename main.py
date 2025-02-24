@@ -10,20 +10,39 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+def format_stock_symbol(symbol: str, country: str) -> str:
+    """
+    格式化股票代码以适应不同市场
+    
+    Args:
+        symbol: 原始股票代码 (例如: AAPL.US 或 5801.JP)
+        country: 市场国家代码 (US 或 JP)
+    
+    Returns:
+        str: 格式化后的股票代码
+    """
+    # 移除可能存在的后缀
+    clean_symbol = symbol.split('.')[0]
+    
+    if country == 'JP':
+        return f"TYO:{clean_symbol}"
+    elif country == 'US':
+        return clean_symbol
+    else:
+        raise ValueError(f"不支持的市场: {country}")
+
 async def analyze_stock(symbol: str, country: str):
     """股票分析工作流"""
     notifier = TelegramNotifier()
     data_service = DataService()
     
     try:
-        # 获取市场数据（自动故障转移）
-        market_data = await data_service.get_market_data(symbol, country)
-        financials = await data_service.get_financials(symbol, country)
+        # 格式化股票代码
+        formatted_symbol = format_stock_symbol(symbol, country)
 
-        # 准备估值参数
-        financials.update({
-            'shares_outstanding': 1e9  # 应从SEC/EDINET获取实际值
-        })
+        # 获取市场数据
+        market_data = await data_service.get_market_data(formatted_symbol)
+        financials = await data_service.get_financials(formatted_symbol)
 
         # 执行蒙特卡洛模拟
         valuator = MonteCarloValuator(financials, market_data)
@@ -33,7 +52,7 @@ async def analyze_stock(symbol: str, country: str):
         report = {
             'symbol': symbol,
             'current_price': market_data['price'],
-            'currency': market_data['currency'],
+            'currency': financials['currency'],
             **results['valuation_range'],
             'undervalued_prob': results['probabilities']['undervalued'],
             'overvalued_prob': results['probabilities']['overvalued'],
@@ -49,11 +68,12 @@ async def analyze_stock(symbol: str, country: str):
             "error_info": str(e),
             "advice": "检查输入参数或联系系统管理员"
         }
+        # 发送错误消息并等待完成
         await notifier.send_message(error_msg, 'error')
         raise
     finally:
-        # 移除对未定义fetcher的引用
-        await data_service.close()  # 确保DataService有close方法
+        # 确保所有消息发送完成
+        await data_service.close()
         await notifier.close()
 
 def main():

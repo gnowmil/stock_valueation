@@ -1,58 +1,68 @@
 # data/models/monte_carlo.py
 import numpy as np
-import pandas as pd
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any, List
 from tqdm import tqdm
 from config import get_settings
 from .dcf_model import DCFValuation
-from .pe_model import PEValuation
+import logging
 
 settings = get_settings()
 
 class MonteCarloValuator:
     """混合估值蒙特卡洛模拟引擎"""
     
-    def __init__(self, financials: Dict, market_data: Dict):
+    def __init__(self, financials: Dict[str, Any], market_data: Dict[str, Any]):
+        self.logger = logging.getLogger(__name__)
         self.financials = financials
         self.market_data = market_data
-        self.industry_pe = self._get_industry_pe()
+        self.settings = settings
         
-    def _get_industry_pe(self) -> float:
-        # 此处可接入行业数据API
-        return 18.0  # 示例值
+    def _get_pe(self) -> float:
+        """获取股票PE值"""
+        try:
+            pe_ratio = float(self.market_data.get('pe_ratio', 0))
+            
+            if pe_ratio <= 0 or pe_ratio > 1000:  # 添加上限以过滤异常值
+                return 20.0
+            
+            return pe_ratio
+                
+        except (KeyError, ValueError) as e:
+            return 20.0
         
-    def run_simulation(self, n_sims: int = None) -> Dict:
-        """执行混合模型模拟"""
-        n_sims = n_sims or settings.model.monte_carlo_sims
-        results = {'dcf': [], 'pe': []}
-        
-        # 定义参数分布
-        growth_dist = self._create_growth_distribution()
-        discount_dist = self._create_discount_distribution()
-        pe_dist = self._create_pe_distribution()
-        
-        for _ in tqdm(range(n_sims), desc="Running Simulations"):
-            # DCF参数抽样
-            growth = np.random.normal(*growth_dist)
-            discount = np.random.normal(*discount_dist)
-            terminal_growth = np.random.uniform(0.01, 0.03)
+    def run_simulation(self) -> Dict[str, Any]:
+        try:
+            # 确保价格不为零
+            current_price = float(self.market_data.get('price', 0))
+            if current_price <= 0:
+                raise ValueError("市场价格必须大于0")
+
+            # 运行蒙特卡洛模拟
+            simulations = self._run_monte_carlo()
             
-            # PE参数抽样
-            pe = np.random.lognormal(*pe_dist)
-            earnings_growth = np.random.normal(growth*0.8, 0.02)  # 利润增速与收入增速相关
+            # 计算收益率统计
+            mu = np.mean(simulations) / current_price - 1 if current_price > 0 else 0
+            sigma = np.std(simulations) / current_price if current_price > 0 else 0
             
-            # 计算估值
-            dcf_val = DCFValuation(self.financials).calculate(growth, discount, terminal_growth)
-            pe_val = PEValuation(self.financials, self.industry_pe).calculate(pe, earnings_growth)
+            # 计算漂移
+            if sigma > 0:
+                drift = mu - 0.5 * sigma**2
+            else:
+                drift = mu
+                
+            return {
+                'valuation_range': {
+                    'low': float(np.percentile(simulations, 25)),
+                    'medium': float(np.percentile(simulations, 50)),
+                    'high': float(np.percentile(simulations, 75))
+                },
+                'probabilities': self._calculate_probabilities(simulations),
+                'next_quarters': self._predict_next_quarters(drift, sigma)
+            }
             
-            # 转换为股价
-            dcf_price = dcf_val / self.market_data['shares_outstanding']
-            pe_price = pe_val / self.market_data['shares_outstanding']
-            
-            results['dcf'].append(dcf_price)
-            results['pe'].append(pe_price)
-            
-        return self._analyze_results(results)
+        except Exception as e:
+            self.logger.error(f"蒙特卡洛模拟失败: {str(e)}")
+            raise
         
     def _create_growth_distribution(self) -> Tuple[float, float]:
         """生成营收增长率的正态分布参数"""
@@ -68,32 +78,36 @@ class MonteCarloValuator:
         
     def _create_pe_distribution(self) -> Tuple[float, float]:
         """生成PE比率的对数正态分布参数"""
-        log_pe = np.log(self.industry_pe)
+        log_pe = np.log(self._get_pe())
         sigma = 0.2
         return (log_pe, sigma)
         
-    def _analyze_results(self, results: Dict) -> Dict:
+    def _analyze_results(self, simulations: np.ndarray) -> Dict[str, Any]:
         """分析模拟结果并生成预测"""
-        combined = np.array(results['dcf']) * 0.6 + np.array(results['pe']) * 0.4
-        
-        # 计算分位数
-        percentiles = np.percentile(combined, [5, 25, 50, 75, 95])
-        
-        return {
-            'current_price': self.market_data['price'],
-            'valuation_range': {
-                'Q1': percentiles[0],
-                'Q2': percentiles[1],
-                'median': percentiles[2],
-                'Q3': percentiles[3],
-                'Q4': percentiles[4]
-            },
-            'probabilities': {
-                'undervalued': np.mean(combined < self.market_data['price']),
-                'overvalued': np.mean(combined > self.market_data['price'])
-            },
-            'next_quarters': self._forecast_quarters(combined)
-        }
+        try:
+            current_price = float(self.market_data.get('price', 0))
+            
+            # 限制估值范围在当前价格的0.5-2倍之间
+            simulations = np.clip(simulations, current_price * 0.5, current_price * 2.0)
+            
+            # 计算分位数
+            percentiles = np.percentile(simulations, [25, 50, 75])
+            
+            return {
+                'valuation_range': {
+                    'low': round(float(percentiles[0]), 2),
+                    'medium': round(float(percentiles[1]), 2),
+                    'high': round(float(percentiles[2]), 2)
+                },
+                'probabilities': self._calculate_probabilities(simulations),
+                'next_quarters': self._predict_next_quarters(
+                    np.mean(simulations) / current_price - 1,  # 漂移率
+                    np.std(simulations) / current_price       # 波动率
+                )
+            }
+        except Exception as e:
+            self.logger.error(f"分析结果失败: {str(e)}")
+            raise
         
     def _forecast_quarters(self, simulations: np.ndarray) -> Dict:
         """预测未来四季度价格路径"""
@@ -116,3 +130,110 @@ class MonteCarloValuator:
             'Q3': np.percentile([p[2] for p in paths], [25, 50, 75]),
             'Q4': np.percentile([p[3] for p in paths], [25, 50, 75])
         }
+
+    def _run_monte_carlo(self) -> np.ndarray:
+        """执行蒙特卡洛模拟"""
+        try:
+            n_sims = self.settings.model.monte_carlo_sims
+            simulations = np.zeros(n_sims)
+            
+            # 获取当前市值作为基准
+            current_price = float(self.market_data.get('price', 0))
+            if current_price <= 0:
+                raise ValueError("无效的当前价格")
+                
+            # 获取分布参数
+            growth_mu, growth_sigma = self._create_growth_distribution()
+            discount_mu, discount_sigma = self._create_discount_distribution()
+            pe_mu, pe_sigma = self._create_pe_distribution()
+            terminal_growth = 0.02
+            
+            # 使用 tqdm 显示进度条
+            for i in tqdm(range(n_sims), desc="运行模拟"):
+                # 生成随机参数
+                growth = np.random.normal(growth_mu, growth_sigma)
+                discount = np.random.normal(discount_mu, discount_sigma)
+                pe = np.exp(np.random.normal(pe_mu, pe_sigma))
+                
+                # DCF 估值 (60% 权重)
+                dcf_val = DCFValuation(self.financials).calculate(
+                    growth, 
+                    discount, 
+                    terminal_growth
+                )
+                
+                # PE 估值 (40% 权重)
+                eps = float(self.financials.get('eps', 0))
+                pe_val = pe * eps
+                
+                # 组合估值结果，并限制在合理范围内
+                combined_val = dcf_val * 0.6 + pe_val * 0.4
+                simulations[i] = np.clip(
+                    combined_val,
+                    current_price * 0.5,  # 最低不低于当前价格的50%
+                    current_price * 2.0   # 最高不超过当前价格的2倍
+                )
+                
+            return simulations
+            
+        except Exception as e:
+            self.logger.error(f"执行蒙特卡洛模拟失败: {str(e)}")
+            raise
+
+    def _calculate_probabilities(self, simulations: np.ndarray) -> Dict[str, float]:
+        """计算估值概率"""
+        try:
+            current_price = float(self.market_data.get('price', 0))
+            
+            # 使用相对价格差计算概率
+            price_diff = (simulations - current_price) / current_price
+            
+            # 设置更严格的阈值
+            undervalued_threshold = 0.15  # 低于15%视为低估
+            overvalued_threshold = 0.15   # 高于15%视为高估
+            
+            undervalued = np.mean(price_diff < -undervalued_threshold)
+            overvalued = np.mean(price_diff > overvalued_threshold)
+            fairly_valued = 1 - undervalued - overvalued
+            
+            self.logger.debug(f"低估概率: {undervalued:.2%}")
+            self.logger.debug(f"公允概率: {fairly_valued:.2%}")
+            self.logger.debug(f"高估概率: {overvalued:.2%}")
+            
+            return {
+                'undervalued': round(float(undervalued), 4),
+                'overvalued': round(float(overvalued), 4),
+                'fair_valued': round(float(fairly_valued), 4)
+            }
+        except Exception as e:
+            self.logger.error(f"计算概率失败: {str(e)}")
+            return {'undervalued': 0.0, 'overvalued': 0.0, 'fair_valued': 1.0}
+
+    def _predict_next_quarters(self, drift: float, sigma: float, quarters: int = 4) -> List[float]:
+        """预测未来季度股价"""
+        try:
+            current_price = float(self.market_data.get('price', 0))
+            predictions = []
+            
+            # 限制参数范围
+            drift = np.clip(drift, -0.15, 0.15)  # 年化±15%
+            sigma = np.clip(sigma, 0.05, 0.25)   # 波动率5%-25%
+            
+            price = current_price
+            for _ in range(quarters):
+                # 生成随机波动
+                z = np.random.normal()
+                # 计算季度收益率
+                quarterly_return = (drift/4) + (sigma/2) * z
+                # 更新价格
+                price = price * (1 + quarterly_return)
+                # 限制单季度价格变动范围
+                price = np.clip(price, current_price * 0.8, current_price * 1.2)
+                predictions.append(round(float(price), 2))
+            
+            self.logger.debug(f"预测未来{quarters}个季度价格: {predictions}")
+            return predictions
+            
+        except Exception as e:
+            self.logger.error(f"季度预测失败: {str(e)}")
+            return [round(current_price, 2)] * quarters

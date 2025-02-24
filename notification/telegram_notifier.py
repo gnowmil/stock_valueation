@@ -1,15 +1,14 @@
 # notification/telegram_notifier.py
 import logging
 import asyncio
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from aiohttp import ClientSession, ClientError, ClientTimeout
 from config import get_settings
 from pydantic import ValidationError
 import json
-from datetime import datetime
+import re
 
 settings = get_settings()
-logger = logging.getLogger(__name__)
 
 class NotificationError(Exception):
     """通知系统异常基类"""
@@ -19,70 +18,158 @@ class TelegramNotifier:
     """智能Telegram通知系统（支持Markdown排版和消息队列）"""
     
     def __init__(self):
-        self.session: Optional[ClientSession] = None
-        self.queue = asyncio.Queue()
-        self._message_formatter = MessageFormatter()
-        # 从配置加载参数
-        self.token = settings.telegram.bot_token
-        self.chat_id = settings.telegram.chat_id
-        self.timeout = ClientTimeout(total=settings.telegram.timeout)
-        self.parse_mode = settings.telegram.parse_mode
+        self.logger = logging.getLogger(__name__)
+        self.settings = get_settings()
         
-        # 自动启动后台任务
+        # 初始化基本属性
+        self.token = self.settings.telegram.bot_token
+        self.chat_id = self.settings.telegram.chat_id
+        self.timeout = ClientTimeout(total=self.settings.telegram.timeout_seconds)
+        self.parse_mode = "MarkdownV2"
+        
+        # 初始化消息队列和会话
+        self.queue = asyncio.Queue()
+        self.session = None
         self._task = asyncio.create_task(self._process_queue())
 
-    async def _create_session(self):
-        """创建可复用的aiohttp会话"""
-        if self.session is None or self.session.closed:
-            self.session = ClientSession(
-                base_url="https://api.telegram.org",
-                headers={"Content-Type": "application/json"},
-                timeout=self.timeout
-            )
+        # 初始化消息格式化器
+        self._message_formatter = MessageFormatter()
+        
+    async def _ensure_session(self):
+        """确保会话可用"""
+        if self.session == None or self.session.closed:
+            self.session = ClientSession(timeout=self.timeout)
 
-    async def send_message(self, content: Dict[str, Any], msg_type: str = 'valuation'):
-        """
-        发送智能格式化消息
-        :param content: 原始数据内容
-        :param msg_type: 消息类型（valuation/error/warning）
-        """
-        formatted = self._message_formatter.format(content, msg_type)
-        await self.queue.put(formatted)
+    async def _validate_config(self) -> bool:
+        """验证Telegram配置是否有效"""
+        try:
+            await self._ensure_session()
+            
+            # 测试getMe接口验证token
+            async with self.session.get(f"/bot{self.token}/getMe") as resp:
+                if resp.status != 200:
+                    self.logger.error(f"Bot Token无效: HTTP {resp.status}")
+                    return False
+                    
+                bot_info = await resp.json()
+                if not bot_info.get('ok'):
+                    self.logger.error(f"Bot Token验证失败: {bot_info}")
+                    return False
+                    
+                self.logger.debug(f"Bot验证成功: @{bot_info['result']['username']}")
+            
+            # 测试chat_id是否有效
+            test_msg = "配置测试消息"
+            payload = {
+                "chat_id": self.chat_id,
+                "text": test_msg,
+                "disable_notification": True
+            }
+            
+            async with self.session.post(
+                f"/bot{self.token}/sendMessage",
+                json=payload
+            ) as resp:
+                if resp.status != 200:
+                    self.logger.error(f"Chat ID无效: HTTP {resp.status}")
+                    return False
+                    
+                result = await resp.json()
+                if not result.get('ok'):
+                    self.logger.error(f"发送测试消息失败: {result}")
+                    return False
+                    
+                self.logger.debug("Chat ID验证成功")
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"验证配置时出错: {str(e)}")
+            return False
+            
+        finally:
+            if self.session:
+                await self.session.close()
+                
+    async def send_message(self, content: Dict[str, Any], msg_type: str) -> None:
+        """发送消息并等待发送完成"""
+        try:
+            formatted = self._message_formatter.format(content, msg_type)
+            await self._safe_send(formatted)
+            self.logger.info(f"{msg_type}消息发送成功")
+            
+        except Exception as e:
+            error_msg = f"消息发送失败: {str(e)}"
+            self.logger.error(error_msg)
+            raise NotificationError(error_msg)
 
     async def _process_queue(self):
-        """后台消息队列处理器"""
-        while True:
-            try:
-                message = await self.queue.get()
-                await self._safe_send(message)
-                await asyncio.sleep(0.1)  # 控制发送频率
-            except Exception as e:
-                logger.error(f"Queue processing error: {str(e)}")
-
-    async def _safe_send(self, message: str, retries=3):
-        """带指数退避的安全发送机制"""
-        attempt = 0
-        backoff = 2
-        
-        while attempt < retries:
-            try:
-                return await self._send_api_request(message)
-            except ClientError as e:
-                attempt += 1
-                wait = backoff ** attempt
-                logger.warning(f"Attempt {attempt} failed, retrying in {wait}s: {str(e)}")
-                await asyncio.sleep(wait)
-            except NotificationError as e:
-                logger.error(f"Permanent send failure: {str(e)}")
-                break
+        """处理消息队列"""
+        try:
+            while True:
+                # 等待新消息
+                message, msg_type = await self.queue.get()
                 
-        logger.error(f"Message failed after {retries} attempts: {message[:60]}...")
+                try:
+                    await self._safe_send(message)
+                    self.logger.info(f"{msg_type}消息发送成功")
+                except Exception as e:
+                    self.logger.error(f"发送消息失败: {str(e)}")
+                finally:
+                    # 标记任务完成
+                    self.queue.task_done()
+                    
+        except asyncio.CancelledError:
+            self.logger.debug("消息队列处理任务被取消")
+        except Exception as e:
+            self.logger.error(f"队列处理错误: {str(e)}")
 
-    async def _send_api_request(self, message: str):
+    async def _escape_markdown(self, text: str) -> str:
+        """转义 MarkdownV2 特殊字符"""
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', 
+                        '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+
+    async def _safe_send(self, message: str) -> None:
+        """安全发送消息"""
+        try:
+            # 确保会话可用
+            await self._ensure_session()
+            
+            # 转义消息中的特殊字符
+            escaped_message = await self._escape_markdown(message)
+            
+            # 构建请求参数
+            params = {
+                'chat_id': self.chat_id,
+                'text': escaped_message,
+                'parse_mode': self.parse_mode
+            }
+            
+            # 构建完整的 URL
+            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            
+            async with self.session.post(url, json=params) as response:
+                if response.status != 200:
+                    error_data = await response.json()
+                    raise NotificationError(
+                        f"发送失败: HTTP {response.status}, {error_data.get('description', '')}"
+                    )
+                    
+                self.logger.info(f"{message.split()[0]}消息发送成功")
+                
+        except Exception as e:
+            self.logger.error(f"发送消息时出错: {str(e)}")
+            raise NotificationError(f"发送消息时出错: {str(e)}")
+
+    async def _send_api_request(self, message: str) -> bool:
         """执行实际的API请求"""
-        await self._create_session()
+        await self._ensure_session()
         
         try:
+            success = True
             # 自动分割长消息
             for chunk in self._split_message(message):
                 payload = {
@@ -98,13 +185,18 @@ class TelegramNotifier:
                 ) as resp:
                     if resp.status != 200:
                         error = await resp.text()
-                        raise NotificationError(f"API Error {resp.status}: {error}")
+                        raise NotificationError(f"API状态码错误 {resp.status}: {error}")
                         
                     response_data = await resp.json()
                     if not response_data.get('ok'):
-                        raise NotificationError(f"API Response error: {response_data}")
+                        raise NotificationError(f"API返回错误: {response_data}")
+                        
+            return success
+            
         except ValidationError as e:
-            raise NotificationError(f"Invalid message format: {str(e)}")
+            raise NotificationError(f"消息格式无效: {str(e)}")
+        except Exception as e:
+            raise NotificationError(f"发送消息时发生错误: {str(e)}")
 
     def _split_message(self, message: str, max_length=4096) -> list:
         """智能分割长消息（保持Markdown结构）"""
@@ -133,10 +225,19 @@ class TelegramNotifier:
         return chunks
 
     async def close(self):
-        """安全关闭资源"""
-        if self.session:
-            await self.session.close()
-        self._task.cancel()
+        """关闭通知器"""
+        try:
+            # 取消队列处理任务
+            if hasattr(self, '_task'):
+                self._task.cancel()
+                await self._task
+            
+            # 关闭会话
+            if self.session and not self.session.closed:
+                await self.session.close()
+                
+        except Exception as e:
+            self.logger.error(f"关闭通知器失败: {str(e)}")
 
 class MessageFormatter:
     """多模板消息格式化系统"""
@@ -192,69 +293,82 @@ class MessageFormatter:
         """
     }
 
-    def format(self, data: Dict, msg_type: str) -> str:
-        """智能选择模板并格式化"""
-        template = self.TEMPLATES.get(msg_type)
-        if not template:
-            raise ValueError(f"未知的消息类型: {msg_type}")
-            
-        # 预处理特殊字段
-        data.setdefault('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        
-        if msg_type == 'valuation':
-            data['forecast_table'] = self._format_forecast(data['next_quarters'])
-            data['symbol'] = data.get('symbol', 'UNKNOWN')
-            data['market'] = self._detect_market(data.get('currency', 'USD'))
-            
-        return template.format(**data).strip()
+    def _format_next_quarters(self, next_quarters: List[float]) -> str:
+        """格式化未来季度预测"""
+        try:
+            quarters = []
+            for i, price in enumerate(next_quarters, 1):
+                quarters.append(f"Q{i}: {price:.2f}")
+            return "\n".join(quarters) if quarters else "暂无季度预测"
+        except Exception as e:
+            self.logger.error(f"格式化季度预测失败: {str(e)}")
+            return "季度预测格式化错误"
 
-    def _format_forecast(self, forecast: Dict) -> str:
-        """生成格式化预测表格"""
-        rows = []
-        for q in ['Q1', 'Q2', 'Q3', 'Q4']:
-            low, med, high = forecast[q]
-            rows.append(
-                f"│ {q.ljust(4)} │ ${low:.2f} │ ${med:.2f} │ ${high:.2f} │"
-            )
+    def format(self, data: Dict[str, Any], msg_type: str) -> str:
+        """格式化消息"""
+        try:
+            if msg_type == 'valuation':
+                template = (
+                    "*股票估值报告*\n"
+                    "代码: `{symbol}`\n"
+                    "当前价格: `{currency} {current_price:.2f}`\n\n"
+                    "*估值区间*\n"
+                    "低估值: `{currency} {low:.2f}`\n"
+                    "中位值: `{currency} {medium:.2f}`\n"
+                    "高估值: `{currency} {high:.2f}`\n\n"
+                    "*概率分析*\n"
+                    "低估概率: `{undervalued_prob:.1%}`\n"
+                    "高估概率: `{overvalued_prob:.1%}`\n\n"
+                    "*未来预测*\n{forecast_table}"
+                )
+                
+                # 格式化季度预测
+                data['forecast_table'] = self._format_next_quarters(data['next_quarters'])
+                
+                return template.format(**data).strip()
+            elif msg_type == 'error':
+                return (
+                    "*错误报告*\n"
+                    "模块: `{module}`\n"
+                    "错误: `{error_info}`\n"
+                    "建议: `{advice}`"
+                ).format(**data).strip()
+            else:
+                raise ValueError(f"不支持的消息类型: {msg_type}")
+                
+        except Exception as e:
+            self.logger.error(f"消息格式化失败: {str(e)}")
+            return str(data)  # 作为后备，直接返回原始数据的字符串表示
+
+    def _format_forecast(self, forecast: List[float]) -> str:
+        """
+        格式化预测数据表格
+        
+        Args:
+            forecast: 未来季度的预测数据列表
             
-        return (
-            "```\n"
-            "┌──────┬─────────┬─────────┬─────────┐\n"
-            "│ 季度 │ 悲观估值 │ 中性估值 │ 乐观估值 │\n"
-            "├──────┼─────────┼─────────┼─────────┤\n" +
-            "\n".join(rows) + "\n"
-            "└──────┴─────────┴─────────┴─────────┘\n"
-            "```"
-        )
+        Returns:
+            str: 格式化后的 Markdown 表格
+        """
+        try:
+            # 表头
+            table = "季度 | 预测价格\n"
+            table += "---|---\n"
+            
+            # 添加每个季度的预测值
+            for i, price in enumerate(forecast, 1):
+                table += f"Q{i} | {price:.2f}\n"
+                
+            return table
+            
+        except Exception as e:
+            self.logger.error(f"格式化预测数据失败: {str(e)}")
+            return "预测数据格式化失败"
 
     def _detect_market(self, currency: str) -> str:
         """根据货币识别市场"""
         return "东京证交所" if currency == 'JPY' else "纽交所/纳斯达克"
 
-# 示例用法
-async def demo_send_valuation():
-    notifier = TelegramNotifier()
-    
-    sample_data = {
-        "symbol": "AAPL",
-        "current_price": 185.25,
-        "currency": "USD",
-        "Q1": 170.50,
-        "median": 192.30,
-        "Q4": 210.75,
-        "undervalued_prob": 0.35,
-        "overvalued_prob": 0.65,
-        "next_quarters": {
-            "Q1": (175.1, 180.3, 185.5),
-            "Q2": (180.5, 188.2, 195.0),
-            "Q3": (185.0, 192.3, 200.1),
-            "Q4": (190.5, 198.4, 210.2)
-        }
-    }
-    
-    await notifier.send_message(sample_data, 'valuation')
-    await notifier.close()
-
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(demo_send_valuation())
+    if settings.env_state == "development":
+        logging.getLogger().setLevel(logging.DEBUG)

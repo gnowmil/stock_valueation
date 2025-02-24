@@ -12,3 +12,4 @@ pandas>=1.5.0
 xmltodict>=0.13.0
 pydantic_settings>=2.8.0
 yfinance>=0.1.64
+tenacity>=9.0.0

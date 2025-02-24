@@ -2,7 +2,7 @@
 import abc
 import logging
 import asyncio
-from typing import Dict, Optional, Type, Any
+from typing import Dict, Optional, Type
 from datetime import datetime, timedelta
 from functools import wraps
 from dataclasses import dataclass
@@ -69,19 +69,11 @@ def retry(max_retries=3, backoff_factor=0.5):
 
 class BaseFetcher(metaclass=BaseFetcherMeta):
     """财务数据获取器抽象基类"""
-    
-    priority: int = 0
-
-    # 类级健康状态跟踪
-    _health_status: Dict[str, HealthStatus] = {}
 
     def __init__(self, source_name: str):
         self.source_name = source_name
-        self.priority = settings.data_sources.priority.index(source_name)
-        self._health_status.setdefault(source_name, HealthStatus())
-        self._cache = {}
-        self.timeout = getattr(settings, source_name).timeout
-
+        self.logger = logging.getLogger(__name__)
+    
     @classmethod
     def get_available_fetchers(cls) -> Dict[str, Type['BaseFetcher']]:
         """获取所有已注册的数据获取器类"""
@@ -92,25 +84,15 @@ class BaseFetcher(metaclass=BaseFetcherMeta):
         """检查数据源是否可用"""
         pass
 
-    @abc.abstractmethod
-    async def _fetch_raw_market_data(self, symbol: str, country: str) -> Dict:
-        """原始市场数据获取方法（需子类实现）"""
-        pass
-
-    @abc.abstractmethod
-    async def _fetch_raw_financials(self, symbol: str, country: str) -> Dict:
-        """原始财务数据获取方法（需子类实现）"""
-        pass
-
     @retry(max_retries=3)
-    async def fetch_market_data(self, symbol: str, country: str) -> Optional[Dict]:
+    async def fetch_market_data(self, symbol: str) -> Optional[Dict]:
         """带重试机制的市场数据获取"""
-        cache_key = f"market_{symbol}_{country}"
+        cache_key = f"market_{symbol}"
         if cache_data := self._get_cache(cache_key):
             return cache_data
 
         try:
-            raw_data = await self._fetch_raw_market_data(symbol, country)
+            raw_data = await self._fetch_raw_market_data(symbol)
             validated = self._validate_market_data(raw_data)
             normalized = self._normalize_market_data(validated)
             self._update_health(True)
@@ -121,14 +103,14 @@ class BaseFetcher(metaclass=BaseFetcherMeta):
             raise DataFetchError(f"{self.source_name}市场数据获取失败") from e
 
     @retry(max_retries=3)
-    async def fetch_financials(self, symbol: str, country: str) -> Optional[Dict]:
+    async def fetch_financials(self, symbol: str) -> Optional[Dict]:
         """带重试机制的财务数据获取"""
-        cache_key = f"financials_{symbol}_{country}"
+        cache_key = f"financials_{symbol}"
         if cache_data := self._get_cache(cache_key):
             return cache_data
 
         try:
-            raw_data = await self._fetch_raw_financials(symbol, country)
+            raw_data = await self._fetch_raw_financials(symbol)
             validated = self._validate_financials(raw_data)
             normalized = self._normalize_financials(validated)
             self._update_health(True)
@@ -154,28 +136,6 @@ class BaseFetcher(metaclass=BaseFetcherMeta):
                 raise ValidationError(f"缺少有效的{field}数据")
         return data
 
-    def _normalize_market_data(self, data: Dict) -> Dict:
-        """市场数据标准化"""
-        return {
-            'source': self.source_name,
-            'price': float(data.get('price', 0)),
-            'volume': int(data.get('volume', 0)),
-            'pe_ratio': float(data.get('pe_ratio', 0)) if data.get('pe_ratio') else None,
-            'currency': data.get('currency', 'USD'),
-            'timestamp': datetime.now().isoformat()
-        }
-
-    def _normalize_financials(self, data: Dict) -> Dict:
-        """财务数据标准化"""
-        return {
-            'source': self.source_name,
-            'revenue': float(data.get('revenue', 0)),
-            'net_income': float(data.get('net_income', 0)),
-            'eps': float(data.get('eps', 0)) if data.get('eps') else None,
-            'report_date': data.get('report_date', datetime.now().date().isoformat()),
-            'currency': data.get('currency', 'USD')
-        }
-
     def _update_health(self, success: bool):
         """更新健康状态"""
         status = self._health_status[self.source_name]
@@ -195,12 +155,7 @@ class BaseFetcher(metaclass=BaseFetcherMeta):
     def is_healthy(self) -> bool:
         """健康状态判定"""
         return self.health_status.is_healthy
-
-    @property
-    def is_available(self) -> bool:
-        """数据源是否可用"""
-        return self.source_name in settings.data_sources.priority and self.is_healthy
-
+    
     def _get_cache(self, key: str) -> Optional[Dict]:
         """获取缓存数据"""
         entry = self._cache.get(key)
