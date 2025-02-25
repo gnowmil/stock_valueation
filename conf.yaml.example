@@ -14,7 +14,6 @@ telegram:
   bot_token: you bot token here
   chat_id: your chat id here
   timeout: 10
-  parse_mode: "MarkdownV2"
 
 # 模型参数
 model:
