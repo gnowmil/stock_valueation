@@ -5,13 +5,11 @@ import asyncio
 from typing import Optional
 import aiohttp
 from config import get_settings
-from notification.telegram_notifier import MessageFormatter
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
 class TelegramGetChatID:
-
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
@@ -58,7 +56,6 @@ class TelegramGetChatID:
             return None
 
 async def main():
-    """主函数"""
     settings = get_settings()
     bot_token = settings.telegram.bot_token
     

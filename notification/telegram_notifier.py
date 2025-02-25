@@ -15,7 +15,21 @@ class NotificationError(Exception):
     pass
 
 class TelegramNotifier:
-    """智能Telegram通知系统（支持Markdown排版和消息队列）"""
+    """
+    Telegram通知器
+    
+    通过Telegram Bot API发送估值报告和错误通知。
+    
+    属性:
+        token (str): Telegram Bot令牌
+        chat_id (int): 目标聊天ID
+        timeout (ClientTimeout): 请求超时设置
+        parse_mode (str): 消息解析模式
+    
+    示例:
+        >>> notifier = TelegramNotifier()
+        >>> await notifier.send_message(report, 'valuation')
+    """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -92,7 +106,26 @@ class TelegramNotifier:
                 await self.session.close()
                 
     async def send_message(self, content: Dict[str, Any], msg_type: str) -> None:
-        """发送消息并等待发送完成"""
+        """
+        发送消息
+        
+        格式化并发送指定类型的消息到Telegram。
+        
+        参数:
+            content (Dict[str, Any]): 消息内容字典
+            msg_type (str): 消息类型，可选值：
+                - 'valuation': 估值报告
+                - 'error': 错误信息
+        
+        异常:
+            NotificationError: 当消息发送失败时
+        
+        示例:
+            >>> await notifier.send_message({
+            ...     'symbol': 'AAPL',
+            ...     'price': 150.0
+            ... }, 'valuation')
+        """
         try:
             formatted = self._message_formatter.format(content, msg_type)
             await self._safe_send(formatted)

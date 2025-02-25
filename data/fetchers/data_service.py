@@ -9,7 +9,19 @@ from .fmp_fetcher import FMPFetcher
 #logger = logging.getLogger(__name__)
 
 class DataService:
-    """数据服务类"""
+    """
+    数据服务
+    
+    管理数据获取和缓存，支持多个数据源。
+    
+    属性:
+        fetcher (BaseFetcher): 数据获取器实例
+        cache (Dict): 数据缓存
+    
+    示例:
+        >>> service = DataService()
+        >>> market_data = await service.get_market_data('AAPL')
+    """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -19,7 +31,6 @@ class DataService:
         self.fetcher = FMPFetcher()
 
     async def get_market_data(self, symbol: str) -> Dict[str, Any]:
-        """获取市场数据"""
         try:
             self.logger.debug(f"从 FMP 获取市场数据")
             if await self.fetcher.is_available():
@@ -31,7 +42,6 @@ class DataService:
             raise
 
     async def get_financials(self, symbol: str) -> Dict[str, Any]:
-        """获取财务数据"""
         try:
             self.logger.debug(f"从 FMP 获取财务数据")
             if await self.fetcher.is_available():

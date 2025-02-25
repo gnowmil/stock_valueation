@@ -9,7 +9,22 @@ import logging
 settings = get_settings()
 
 class MonteCarloValuator:
-    """混合估值蒙特卡洛模拟引擎"""
+    """
+    蒙特卡洛估值器
+    
+    使用蒙特卡洛模拟进行股票估值分析，结合DCF和PE两种估值方法。
+    
+    属性:
+        financials (Dict[str, Any]): 财务数据字典
+        market_data (Dict[str, Any]): 市场数据字典
+        settings (Settings): 全局配置对象
+        logger (Logger): 日志记录器
+    
+    示例:
+        >>> valuator = MonteCarloValuator(financials_data, market_data)
+        >>> results = valuator.run_simulation()
+        >>> print(results['valuation_range'])
+    """
     
     def __init__(self, financials: Dict[str, Any], market_data: Dict[str, Any]):
         self.logger = logging.getLogger(__name__)
@@ -33,6 +48,21 @@ class MonteCarloValuator:
             return default_pe
         
     def run_simulation(self) -> Dict[str, Any]:
+        """
+        执行蒙特卡洛模拟
+        
+        运行指定次数的模拟，生成估值分布并分析结果。
+        
+        返回:
+            Dict[str, Any]: 包含以下键的字典：
+                - valuation_range: 估值区间（低、中、高）
+                - probabilities: 低估/高估概率
+                - next_quarters: 未来季度预测价格
+        
+        异常:
+            ValueError: 当输入数据无效时
+            RuntimeError: 当模拟过程出错时
+        """
         try:
             # 确保价格不为零
             current_price = float(self.market_data.get('price', 0))
@@ -213,7 +243,23 @@ class MonteCarloValuator:
             return {'undervalued': 0.0, 'overvalued': 0.0, 'fair_valued': 1.0}
 
     def _predict_next_quarters(self, drift: float, sigma: float, quarters: int = 4) -> List[float]:
-        """预测未来季度股价"""
+        """
+        预测未来季度股价
+        
+        使用几何布朗运动模型预测未来季度的股价走势。
+        
+        参数:
+            drift (float): 年化漂移率，范围[-0.5, 0.5]
+            sigma (float): 年化波动率，范围[0, 0.5]
+            quarters (int): 预测季度数，默认4个季度
+        
+        返回:
+            List[float]: 未来季度的预测价格列表
+        
+        示例:
+            >>> predictions = valuator._predict_next_quarters(0.1, 0.2)
+            >>> print(f"下季度预测价格: {predictions[0]}")
+        """
         try:
             current_price = float(self.market_data.get('price', 0))
             predictions = []
