@@ -310,15 +310,15 @@ class MessageFormatter:
             if msg_type == 'valuation':
                 template = (
                     "*股票估值报告*\n"
-                    "代码: `{symbol}`\n"
-                    "当前价格: `{currency} {current_price:.2f}`\n\n"
+                    "代码(财报日期): {symbol}({date})\n"
+                    "当前价格: {currency} {current_price:.2f}\n\n"
                     "*估值区间*\n"
-                    "低估值: `{currency} {low:.2f}`\n"
-                    "中位值: `{currency} {medium:.2f}`\n"
-                    "高估值: `{currency} {high:.2f}`\n\n"
+                    "低估值: {currency} {low:.2f}\n"
+                    "中位值: {currency} {medium:.2f}\n"
+                    "高估值: {currency} {high:.2f}\n\n"
                     "*概率分析*\n"
-                    "低估概率: `{undervalued_prob:.1%}`\n"
-                    "高估概率: `{overvalued_prob:.1%}`\n\n"
+                    "低估概率: {undervalued_prob:.1%}\n"
+                    "高估概率: {overvalued_prob:.1%}\n\n"
                     "*未来预测*\n{forecast_table}"
                 )
                 

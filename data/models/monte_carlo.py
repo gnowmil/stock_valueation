@@ -19,16 +19,18 @@ class MonteCarloValuator:
         
     def _get_pe(self) -> float:
         """获取股票PE值"""
+        default_pe = 15.0
+
         try:
             pe_ratio = float(self.market_data.get('pe_ratio', 0))
             
-            if pe_ratio <= 0 or pe_ratio > 1000:  # 添加上限以过滤异常值
-                return 20.0
+            if pe_ratio <= 0 or pe_ratio > 50:  # 添加上限以过滤异常值
+                return default_pe
             
             return pe_ratio
                 
         except (KeyError, ValueError) as e:
-            return 20.0
+            return default_pe
         
     def run_simulation(self) -> Dict[str, Any]:
         try:
@@ -66,20 +68,20 @@ class MonteCarloValuator:
         
     def _create_growth_distribution(self) -> Tuple[float, float]:
         """生成营收增长率的正态分布参数"""
-        base_growth = 0.05
-        volatility = 0.02
+        base_growth = 0.05     # 保持基础增长率为5%（行业中性）
+        volatility = 0.01      # DCF估值波动，波动率为1%
         return (base_growth, volatility)
         
     def _create_discount_distribution(self) -> Tuple[float, float]:
         """生成折现率的正态分布参数"""
-        base_discount = settings.model.risk_free_rate + 0.05
-        volatility = 0.01
+        base_discount = settings.model.risk_free_rate + 0.04  # 风险溢价为4%
+        volatility = 0.005     # 降低波动率为0.5%
         return (base_discount, volatility)
         
     def _create_pe_distribution(self) -> Tuple[float, float]:
         """生成PE比率的对数正态分布参数"""
         log_pe = np.log(self._get_pe())
-        sigma = 0.2
+        sigma = 0.15          # 波动率为15%
         return (log_pe, sigma)
         
     def _analyze_results(self, simulations: np.ndarray) -> Dict[str, Any]:
@@ -155,23 +157,24 @@ class MonteCarloValuator:
                 discount = np.random.normal(discount_mu, discount_sigma)
                 pe = np.exp(np.random.normal(pe_mu, pe_sigma))
                 
-                # DCF 估值 (60% 权重)
+                # DCF 估值 (70% 权重)
                 dcf_val = DCFValuation(self.financials).calculate(
                     growth, 
                     discount, 
                     terminal_growth
                 )
                 
-                # PE 估值 (40% 权重)
+                # PE 估值 (30% 权重)
                 eps = float(self.financials.get('eps', 0))
                 pe_val = pe * eps
                 
                 # 组合估值结果，并限制在合理范围内
-                combined_val = dcf_val * 0.6 + pe_val * 0.4
+                combined_val = dcf_val * 0.7 + pe_val * 0.3 
+
                 simulations[i] = np.clip(
                     combined_val,
-                    current_price * 0.5,  # 最低不低于当前价格的50%
-                    current_price * 2.0   # 最高不超过当前价格的2倍
+                    current_price * 0.8,   # 最低80%当前价格
+                    current_price * 1.5    # 最高150%当前价格
                 )
                 
             return simulations
@@ -189,8 +192,8 @@ class MonteCarloValuator:
             price_diff = (simulations - current_price) / current_price
             
             # 设置更严格的阈值
-            undervalued_threshold = 0.15  # 低于15%视为低估
-            overvalued_threshold = 0.15   # 高于15%视为高估
+            undervalued_threshold = 0.10  # 低于10%视为低估
+            overvalued_threshold = 0.10   # 高于10%视为高估
             
             undervalued = np.mean(price_diff < -undervalued_threshold)
             overvalued = np.mean(price_diff > overvalued_threshold)
@@ -216,8 +219,8 @@ class MonteCarloValuator:
             predictions = []
             
             # 限制参数范围
-            drift = np.clip(drift, -0.15, 0.15)  # 年化±15%
-            sigma = np.clip(sigma, 0.05, 0.25)   # 波动率5%-25%
+            drift = np.clip(drift, -0.10, 0.10)  # 年化漂移限制从±10%
+            sigma = np.clip(sigma, 0.05, 0.20)   # 波动率限制从5%-20%
             
             price = current_price
             for _ in range(quarters):

@@ -1,6 +1,7 @@
 # stock-valuation-tool/main.py
 import asyncio
 import argparse
+from datetime import datetime
 import logging
 from config.settings import get_settings
 from data.fetchers.data_service import DataService
@@ -49,8 +50,20 @@ async def analyze_stock(symbol: str, country: str):
         results = valuator.run_simulation()
 
         # 格式化并发送结果
+
+                # 解析日期字符串
+        date_str = financials.get('date', '')
+        try:
+            # 截取日期部分，确保只有年月日
+            date_part = date_str[:10]
+            parsed_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+        except ValueError as e:
+            logger.error(f"日期解析失败: {date_str}, {str(e)}")
+            parsed_date = datetime(1982, 9, 17).date()
+
         report = {
             'symbol': symbol,
+            'date': parsed_date,
             'current_price': market_data['price'],
             'currency': financials['currency'],
             **results['valuation_range'],

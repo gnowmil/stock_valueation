@@ -1,4 +1,5 @@
 # data/fetchers/fmp_fetcher.py
+
 import aiohttp
 import logging
 from typing import Dict, Any
@@ -161,6 +162,7 @@ class FMPFetcher(BaseFetcher):
                 'revenue': float,  # 营收
                 'free_cash_flow': float,  # 自由现金流
                 'net_income': float  # 净利润
+                ‘date’: datetime  # 财报日期
             }
             
         Raises:
@@ -192,7 +194,7 @@ class FMPFetcher(BaseFetcher):
                 # 计算流通股数
                 market_cap = float(profile.get('mktCap', 0))
                 shares_outstanding = market_cap / current_price if current_price and current_price != 0 else 0
-
+                
                 result = {
                     'market_cap': market_cap,
                     'currency': str(latest_income.get('reportedCurrency', 0)),
@@ -200,7 +202,8 @@ class FMPFetcher(BaseFetcher):
                     'shares_outstanding': shares_outstanding,
                     'revenue': float(latest_income.get('revenue', 0)),
                     'free_cash_flow': float(latest_cash_flow.get('freeCashFlow', 0)),
-                    'net_income': float(latest_income.get('netIncome', 0)) 
+                    'net_income': float(latest_income.get('netIncome', 0)),
+                    'date': latest_income.get('date', '')
                 }
 
                 self.logger.debug(f"财务数据返回值: {result}")
