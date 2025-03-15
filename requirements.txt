@@ -6,3 +6,5 @@ pydantic_settings>=2.8.0 # 配置管理
 numpy>=1.24.0           # 数学计算
 tqdm>=4.65.0            # 进度条显示
 tenacity>=9.0.0         # 重试机制
+pyyaml>=6.0.0           # YAML解析
+akshare>=0.9.0          # 数据获取
