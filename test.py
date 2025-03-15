@@ -10,7 +10,7 @@ logging.basicConfig(
 
 async def main():
     fetcher = AKShareFetcher()
-    
+
     try:
         # 檢查數據源可用性
         if not await fetcher.is_available():
@@ -22,7 +22,7 @@ async def main():
             ("600519.SH", "貴州茅台"),
             ("00700.HK", "騰訊控股"),
             ("AAPL", "蘋果公司"),
-            ("7203.T", "豐田汽車")
+            #("7203.T", "豐田汽車")
         ]
         
         for symbol, name in symbols:
